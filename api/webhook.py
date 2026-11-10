@@ -38,10 +38,10 @@ def get_db_connection():
         return None
 
 def db_upsert_user(user_id: int, username: str = None, first_name: str = None) -> bool:
-    conn = get_db_connection()
-    if not conn:
-        return False
     try:
+        conn = get_db_connection()
+        if not conn:
+            return False
         with conn.cursor() as cur:
             cur.execute("""
             INSERT INTO telegram_users (
@@ -57,18 +57,17 @@ def db_upsert_user(user_id: int, username: str = None, first_name: str = None) -
                 start_count = telegram_users.start_count + 1,
                 status = 'active';
             """, (user_id, username, first_name))
+        conn.close()
         return True
     except Exception as e:
         logger.error(f"Error upserting user: {e}")
         return False
-    finally:
-        conn.close()
 
 def db_update_interaction(user_id: int, username: str = None, first_name: str = None) -> bool:
-    conn = get_db_connection()
-    if not conn:
-        return False
     try:
+        conn = get_db_connection()
+        if not conn:
+            return False
         with conn.cursor() as cur:
             cur.execute("""
             INSERT INTO telegram_users (
@@ -82,18 +81,17 @@ def db_update_interaction(user_id: int, username: str = None, first_name: str = 
                 last_interaction_at = NOW(),
                 status = 'active';
             """, (user_id, username, first_name))
+        conn.close()
         return True
     except Exception as e:
         logger.error(f"Error updating interaction: {e}")
         return False
-    finally:
-        conn.close()
 
 def db_get_stats() -> dict:
-    conn = get_db_connection()
-    if not conn:
-        return {"total_users": 0, "active_users": 0, "blocked_users": 0, "joined_today": 0, "interacted_today": 0, "total_starts": 0, "db_connected": False}
     try:
+        conn = get_db_connection()
+        if not conn:
+            return {"total_users": 0, "active_users": 0, "blocked_users": 0, "joined_today": 0, "interacted_today": 0, "total_starts": 0, "db_connected": False}
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
             SELECT
@@ -108,53 +106,51 @@ def db_get_stats() -> dict:
             row = cur.fetchone()
             res = dict(row) if row else {}
             res["db_connected"] = True
+            conn.close()
             return res
     except Exception as e:
         return {"total_users": 0, "db_connected": False, "error": str(e)}
-    finally:
-        conn.close()
 
 def db_get_recent_users(limit: int = 10) -> list:
-    conn = get_db_connection()
-    if not conn:
-        return []
     try:
+        conn = get_db_connection()
+        if not conn:
+            return []
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("SELECT user_id, username, first_name, start_count, status FROM telegram_users ORDER BY last_interaction_at DESC LIMIT %s;", (limit,))
-            return list(cur.fetchall())
+            res = list(cur.fetchall())
+            conn.close()
+            return res
     except Exception:
         return []
-    finally:
-        conn.close()
 
 def db_get_all_active_ids() -> list:
-    conn = get_db_connection()
-    if not conn:
-        return []
     try:
+        conn = get_db_connection()
+        if not conn:
+            return []
         with conn.cursor() as cur:
             cur.execute("SELECT user_id FROM telegram_users WHERE status = 'active' ORDER BY last_interaction_at DESC;")
-            return [row[0] for row in cur.fetchall()]
+            res = [row[0] for row in cur.fetchall()]
+            conn.close()
+            return res
     except Exception:
         return []
-    finally:
-        conn.close()
 
 def db_mark_blocked(user_id: int) -> bool:
-    conn = get_db_connection()
-    if not conn:
-        return False
     try:
+        conn = get_db_connection()
+        if not conn:
+            return False
         with conn.cursor() as cur:
             cur.execute("UPDATE telegram_users SET status = 'blocked', last_interaction_at = NOW() WHERE user_id = %s;", (user_id,))
+        conn.close()
         return True
     except Exception:
         return False
-    finally:
-        conn.close()
 
 # ====================================================================
-# 2. TELEGRAM BOT API CLIENT
+# 2. TELEGRAM BOT API CLIENT WITH RETRY & LOGGING
 # ====================================================================
 
 def send_telegram(method: str, payload: dict) -> dict:
@@ -167,7 +163,7 @@ def send_telegram(method: str, payload: dict) -> dict:
         r = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=8)
         res_json = r.json()
         if not res_json.get("ok"):
-            logger.error(f"Telegram API responded with error ({method}): {res_json}")
+            logger.error(f"Telegram API responded with error ({method}): {res_json} | Payload was: {payload}")
         return res_json
     except Exception as e:
         logger.error(f"Telegram API call error ({method}): {e}")
@@ -177,7 +173,14 @@ def tg_send_message(chat_id, text: str, reply_markup: dict = None, parse_mode: s
     payload = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
     if reply_markup:
         payload["reply_markup"] = reply_markup
-    return send_telegram("sendMessage", payload)
+    res = send_telegram("sendMessage", payload)
+    
+    # If failed, retry without HTML parsing and without reply_markup for 100% delivery guarantee
+    if not res.get("ok") and reply_markup:
+        logger.warning(f"sendMessage failed ({res.get('description')}), retrying without reply_markup...")
+        payload_plain = {"chat_id": chat_id, "text": text}
+        return send_telegram("sendMessage", payload_plain)
+    return res
 
 def tg_edit_message(chat_id, message_id: int, text: str, reply_markup: dict = None, parse_mode: str = "HTML") -> dict:
     payload = {"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": parse_mode}
@@ -188,21 +191,33 @@ def tg_edit_message(chat_id, message_id: int, text: str, reply_markup: dict = No
 def tg_answer_callback(callback_id: str, text: str = None) -> dict:
     return send_telegram("answerCallbackQuery", {"callback_query_id": callback_id, "text": text or ""})
 
+def tg_set_menu_button(chat_id: int = None) -> dict:
+    """Sets the Telegram native Mini App menu button at the bottom-left of the chat"""
+    url = get_game_url()
+    payload = {
+        "menu_button": {
+            "type": "web_app",
+            "text": "🚀 OPEN GAME",
+            "web_app": {"url": url}
+        }
+    }
+    if chat_id:
+        payload["chat_id"] = chat_id
+    return send_telegram("setChatMenuButton", payload)
+
 # ====================================================================
 # 3. KEYBOARDS & MESSAGES (TELEGRAM MINI APP INTEGRATION)
 # ====================================================================
 
 def get_game_url():
-    url = os.environ.get("WEB_APP_URL", "https://universallearninggame.vercel.app/")
-    if not url.startswith("http"):
-        url = "https://" + url
-    return url
+    raw_url = os.environ.get("WEB_APP_URL", "https://universallearninggame.vercel.app/").strip()
+    if raw_url.startswith("http://"):
+        raw_url = "https://" + raw_url[7:]
+    elif not raw_url.startswith("https://"):
+        raw_url = "https://" + raw_url
+    return raw_url.rstrip("/")
 
 def get_persistent_reply_keyboard():
-    """
-    Bottom persistent keyboard. The '🚀 OPEN GAME' button uses 'web_app'
-    so pressing it opens the Telegram Mini App directly inside Telegram!
-    """
     url = get_game_url()
     return {
         "keyboard": [
@@ -227,15 +242,12 @@ def get_persistent_reply_keyboard():
     }
 
 def get_open_game_inline_keyboard():
-    """
-    Inline button sent in chat. Clicking it launches the Mini App inside Telegram!
-    """
     url = get_game_url()
     return {
         "inline_keyboard": [
             [
                 {
-                    "text": "🚀 Open Mini App Inside Telegram",
+                    "text": "🚀 Open Mini App (Telegram ichida ochish)",
                     "web_app": {"url": url}
                 }
             ]
@@ -264,7 +276,7 @@ Good luck! 🚀"""
 
 HOW_TO_USE_MESSAGE = """📖 <b>How to Use Universal Learning Game</b>
 
-1. <b>Open the Mini App:</b> Tap <b>🚀 OPEN GAME</b> on your keyboard or the inline button to launch the platform right inside Telegram.
+1. <b>Open the Mini App:</b> Tap <b>🚀 OPEN GAME</b> on your keyboard or the button below to launch the platform right inside Telegram.
 2. <b>10 Interactive Modes:</b> Learn, Classic Quiz, Flashcards (SRS), Matching Game, and Final Exam simulations.
 3. <b>Slide Evidence:</b> Every question is synchronized with verified lecture presentation slides.
 4. <b>Daily Engagement:</b> Return every day and keep your study streak alive!"""
@@ -290,7 +302,7 @@ UPDATES_MESSAGE = """📢 <b>Latest Announcements & Updates</b>
 
 def get_help_message():
     sup = os.environ.get("SUPPORT_USERNAME", "Odilxon_Support").lstrip("@")
-    return f"""🆘 <b>Help & Support</b>\n\nNeed assistance or have questions?\n\n• <b>Direct Support:</b> @{sup}\n• <b>Platform Status:</b> Online 24/7 on Vercel Serverless."""
+    return f"🆘 <b>Help & Support</b>\n\nNeed assistance or have questions?\n\n• <b>Direct Support:</b> @{sup}\n• <b>Platform Status:</b> Online 24/7 on Vercel Serverless."
 
 # ====================================================================
 # 4. ADMIN LOGIC
@@ -305,7 +317,7 @@ def is_admin(user_id: int) -> bool:
 
 def render_admin_stats() -> str:
     s = db_get_stats()
-    db_status = "🟢 Connected (PostgreSQL / Supabase)" if s.get("db_connected") else "🟡 Running without Database (configure DATABASE_URL to persist)"
+    db_status = "🟢 Connected (PostgreSQL / Supabase)" if s.get("db_connected") else "🟡 Running without Database"
     return f"""📊 <b>Universal Learning Game — Admin Dashboard</b>
 
 <b>Database Status:</b> {db_status}
@@ -360,15 +372,18 @@ def process_telegram_update(update: dict):
         if not chat_id or not user_id:
             return
 
-        # /start command
+        # 1. /start command
         if text.startswith("/start"):
             db_upsert_user(user_id, username, first_name)
+            # Configure native Mini App menu button for user
+            tg_set_menu_button(chat_id)
+            # Send Welcome with persistent keyboard
             tg_send_message(
                 chat_id=chat_id,
                 text=WELCOME_MESSAGE,
                 reply_markup=get_persistent_reply_keyboard()
             )
-            # Send inline button directly to launch Mini App
+            # Send direct inline Mini App button
             tg_send_message(
                 chat_id=chat_id,
                 text="👇 <b>Mini ilovani ochish uchun quyidagi tugmani bosing:</b>",
@@ -376,41 +391,49 @@ def process_telegram_update(update: dict):
             )
             return
 
-        # "🚀 OPEN GAME" text message
+        # 2. "🚀 OPEN GAME" text message
         if "OPEN GAME" in text.upper():
             db_update_interaction(user_id, username, first_name)
             tg_send_message(
                 chat_id=chat_id,
-                text="🎮 <b>Universal Learning Game</b>\n\nTelegram ichida ochish uchun quyidagi tugmani bosing:",
+                text="🎮 <b>Universal Learning Game</b>\n\nMini ilovani Telegram ichida ochish uchun quyidagi tugmani bosing:",
                 reply_markup=get_open_game_inline_keyboard()
             )
             return
 
-        # "📖 How to Use"
+        # 3. "📖 How to Use"
         if "HOW TO USE" in text.upper() or text.startswith("/help"):
             db_update_interaction(user_id, username, first_name)
-            tg_send_message(chat_id, HOW_TO_USE_MESSAGE)
+            tg_send_message(
+                chat_id=chat_id,
+                text=HOW_TO_USE_MESSAGE,
+                reply_markup=get_open_game_inline_keyboard()
+            )
             return
 
-        # "ℹ️ About"
+        # 4. "ℹ️ About"
         if "ABOUT" in text.upper() or text.startswith("/about"):
             db_update_interaction(user_id, username, first_name)
-            tg_send_message(chat_id, ABOUT_MESSAGE)
+            tg_send_message(
+                chat_id=chat_id,
+                text=ABOUT_MESSAGE,
+                reply_markup=get_open_game_inline_keyboard()
+            )
             return
 
-        # "📢 Updates"
+        # 5. "📢 Updates"
         if "UPDATES" in text.upper() or "ANNOUNCEMENTS" in text.upper():
             db_update_interaction(user_id, username, first_name)
             tg_send_message(chat_id, UPDATES_MESSAGE)
             return
 
-        # "🆘 Help & Support"
+        # 6. "🆘 Help & Support"
         if "HELP" in text.upper() or "SUPPORT" in text.upper():
             db_update_interaction(user_id, username, first_name)
             tg_send_message(chat_id, get_help_message())
             return
 
-        # /admin and /broadcast
+        # 7. /admin and /broadcast
         if text.startswith("/admin") or text.startswith("/broadcast"):
             if not is_admin(user_id):
                 tg_send_message(chat_id, "⛔ <b>Access Denied:</b> Administrator only.")
@@ -426,9 +449,9 @@ def process_telegram_update(update: dict):
             tg_send_message(chat_id, render_admin_stats(), reply_markup=get_admin_keyboard())
             return
 
-        # Fallback text
+        # 8. Fallback text
         db_update_interaction(user_id, username, first_name)
-        fallback = f"Assalomu alaykum, <b>{first_name or 'qadrli foydalanuvchi'}</b>! 👋\n\nO'yinni ochish uchun quyidagi tugmani bosing:"
+        fallback = f"Assalomu alaykum, <b>{first_name or 'qadrli foydalanuvchi'}</b>! 👋\n\nMini ilovani Telegram ichida ochish uchun quyidagi tugmani bosing:"
         tg_send_message(chat_id, fallback, reply_markup=get_open_game_inline_keyboard())
         return
 
@@ -462,7 +485,7 @@ def process_telegram_update(update: dict):
             tg_edit_message(chat_id, message_id, "📢 <b>Broadcast Command:</b>\n\nSend <code>/broadcast &lt;message&gt;</code> to notify all users.", reply_markup=get_admin_keyboard())
 
 # ====================================================================
-# 6. WSGI APPLICATION (VERCEL PYTHON ENTRYPOINT)
+# 6. WSGI APPLICATION (VERCEL ENTRYPOINT)
 # ====================================================================
 
 def read_index_html():
@@ -519,7 +542,8 @@ def app(environ, start_response):
             "status": "online",
             "service": "Universal Learning Game Telegram Webhook",
             "bot_configured": bool(os.environ.get("BOT_TOKEN")),
-            "database_configured": bool(os.environ.get("DATABASE_URL"))
+            "database_configured": bool(os.environ.get("DATABASE_URL")),
+            "web_app_url": get_game_url()
         }
         res_bytes = json.dumps(status_info, indent=2).encode("utf-8")
         start_response("200 OK", [("Content-Type", "application/json"), ("Content-Length", str(len(res_bytes)))])
