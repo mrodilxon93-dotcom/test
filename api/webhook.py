@@ -4,7 +4,7 @@ import os
 import sys
 import logging
 
-# Ensure project root is in sys.path so 'bot' package can be imported seamlessly
+# Ensure project root is in sys.path
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 if parent_dir not in sys.path:
@@ -17,7 +17,37 @@ logger = logging.getLogger(__name__)
 
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        """Health check and status endpoint"""
+        """
+        Handles GET requests:
+        1. Root URL (/) or (/index.html) -> Serves the Universal Learning Game HTML application.
+        2. Webhook / Healthcheck (/api/webhook or /status) -> Returns service status JSON.
+        """
+        clean_path = self.path.split("?")[0].rstrip("/")
+
+        # Serve frontend game website on root or index.html
+        if clean_path in ("", "/index.html"):
+            index_candidates = [
+                os.path.join(parent_dir, "index.html"),
+                os.path.join(current_dir, "index.html"),
+                "index.html"
+            ]
+            index_path = next((p for p in index_candidates if os.path.exists(p)), None)
+            
+            if index_path:
+                try:
+                    with open(index_path, "rb") as f:
+                        html_content = f.read()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(html_content)))
+                    self.send_header("Cache-Control", "public, max-age=3600")
+                    self.end_headers()
+                    self.wfile.write(html_content)
+                    return
+                except Exception as e:
+                    logger.error(f"Error serving index.html: {e}")
+
+        # Webhook health check endpoint
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Access-Control-Allow-Origin", "*")
