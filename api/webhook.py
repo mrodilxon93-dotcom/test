@@ -15,7 +15,7 @@ try:
     PSYCOPG2_AVAILABLE = True
 except Exception:
     PSYCOPG2_AVAILABLE = False
-    logger.warning("psycopg2 is not available; running database in mock/fallback mode.")
+    logger.warning("psycopg2 is not available; running database in mock mode.")
 
 # ====================================================================
 # 1. DATABASE HELPERS (Supabase / PostgreSQL)
@@ -150,7 +150,7 @@ def db_mark_blocked(user_id: int) -> bool:
         return False
 
 # ====================================================================
-# 2. TELEGRAM BOT API CLIENT WITH RETRY & LOGGING
+# 2. TELEGRAM BOT API CLIENT
 # ====================================================================
 
 def send_telegram(method: str, payload: dict) -> dict:
@@ -163,11 +163,21 @@ def send_telegram(method: str, payload: dict) -> dict:
         r = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=8)
         res_json = r.json()
         if not res_json.get("ok"):
-            logger.error(f"Telegram API responded with error ({method}): {res_json} | Payload was: {payload}")
+            logger.error(f"Telegram API error in {method}: {res_json} | Payload: {payload}")
         return res_json
     except Exception as e:
         logger.error(f"Telegram API call error ({method}): {e}")
         return {"ok": False, "description": str(e)}
+
+def clean_game_url():
+    raw_url = os.environ.get("WEB_APP_URL", "https://universallearninggame.vercel.app").strip()
+    # Strip quotes or spaces
+    raw_url = raw_url.strip('"').strip("'").strip()
+    if raw_url.startswith("http://"):
+        raw_url = "https://" + raw_url[7:]
+    elif not raw_url.startswith("https://"):
+        raw_url = "https://" + raw_url
+    return raw_url.rstrip("/")
 
 def tg_send_message(chat_id, text: str, reply_markup: dict = None, parse_mode: str = "HTML") -> dict:
     payload = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
@@ -175,25 +185,34 @@ def tg_send_message(chat_id, text: str, reply_markup: dict = None, parse_mode: s
         payload["reply_markup"] = reply_markup
     res = send_telegram("sendMessage", payload)
     
-    # If failed, retry without HTML parsing and without reply_markup for 100% delivery guarantee
+    # If failed, attempt sending with a URL fallback button
     if not res.get("ok") and reply_markup:
-        logger.warning(f"sendMessage failed ({res.get('description')}), retrying without reply_markup...")
-        payload_plain = {"chat_id": chat_id, "text": text}
-        return send_telegram("sendMessage", payload_plain)
+        game_url = clean_game_url()
+        logger.warning(f"Initial sendMessage failed ({res.get('description')}). Retrying with URL fallback...")
+        fallback_markup = {
+            "inline_keyboard": [
+                [{"text": "🚀 Open Game (Havola orqali ochish)", "url": game_url}]
+            ]
+        }
+        res_fallback = send_telegram("sendMessage", {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": parse_mode,
+            "reply_markup": fallback_markup
+        })
+        if res_fallback.get("ok"):
+            return res_fallback
+            
+        # Ultimate plain text fallback
+        return send_telegram("sendMessage", {
+            "chat_id": chat_id,
+            "text": f"{text}\n\n🔗 Havola: {game_url}"
+        })
     return res
-
-def tg_edit_message(chat_id, message_id: int, text: str, reply_markup: dict = None, parse_mode: str = "HTML") -> dict:
-    payload = {"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": parse_mode}
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
-    return send_telegram("editMessageText", payload)
-
-def tg_answer_callback(callback_id: str, text: str = None) -> dict:
-    return send_telegram("answerCallbackQuery", {"callback_query_id": callback_id, "text": text or ""})
 
 def tg_set_menu_button(chat_id: int = None) -> dict:
     """Sets the Telegram native Mini App menu button at the bottom-left of the chat"""
-    url = get_game_url()
+    url = clean_game_url()
     payload = {
         "menu_button": {
             "type": "web_app",
@@ -206,19 +225,11 @@ def tg_set_menu_button(chat_id: int = None) -> dict:
     return send_telegram("setChatMenuButton", payload)
 
 # ====================================================================
-# 3. KEYBOARDS & MESSAGES (TELEGRAM MINI APP INTEGRATION)
+# 3. KEYBOARDS & MESSAGES
 # ====================================================================
 
-def get_game_url():
-    raw_url = os.environ.get("WEB_APP_URL", "https://universallearninggame.vercel.app/").strip()
-    if raw_url.startswith("http://"):
-        raw_url = "https://" + raw_url[7:]
-    elif not raw_url.startswith("https://"):
-        raw_url = "https://" + raw_url
-    return raw_url.rstrip("/")
-
 def get_persistent_reply_keyboard():
-    url = get_game_url()
+    url = clean_game_url()
     return {
         "keyboard": [
             [
@@ -242,23 +253,15 @@ def get_persistent_reply_keyboard():
     }
 
 def get_open_game_inline_keyboard():
-    url = get_game_url()
+    url = clean_game_url()
     return {
         "inline_keyboard": [
             [
                 {
-                    "text": "🚀 Open Mini App (Telegram ichida ochish)",
+                    "text": "🚀 OPEN MINI APP",
                     "web_app": {"url": url}
                 }
             ]
-        ]
-    }
-
-def get_admin_keyboard():
-    return {
-        "inline_keyboard": [
-            [{"text": "📊 Refresh Stats", "callback_data": "admin_stats"}, {"text": "👥 Recent Users", "callback_data": "admin_recent"}],
-            [{"text": "📢 Broadcast Info", "callback_data": "admin_broadcast_info"}]
         ]
     }
 
@@ -268,7 +271,7 @@ Ready to improve your knowledge and challenge yourself?
 
 Your learning journey starts here.
 
-Press the <b>🚀 Open Mini App</b> button below to launch the learning platform directly inside Telegram!
+Press the <b>🚀 OPEN MINI APP</b> button below to launch the learning platform directly inside Telegram!
 
 📌 Reminder: Come back every day and press START or tap OPEN GAME below to continue your streak.
 
@@ -304,10 +307,6 @@ def get_help_message():
     sup = os.environ.get("SUPPORT_USERNAME", "Odilxon_Support").lstrip("@")
     return f"🆘 <b>Help & Support</b>\n\nNeed assistance or have questions?\n\n• <b>Direct Support:</b> @{sup}\n• <b>Platform Status:</b> Online 24/7 on Vercel Serverless."
 
-# ====================================================================
-# 4. ADMIN LOGIC
-# ====================================================================
-
 def is_admin(user_id: int) -> bool:
     raw_admin = os.environ.get("ADMIN_ID", "")
     for part in raw_admin.replace(" ", ",").split(","):
@@ -333,30 +332,8 @@ def render_admin_stats() -> str:
 <b>⚡ Admin Controls:</b>
 • Broadcast: <code>/broadcast &lt;message&gt;</code>"""
 
-def handle_broadcast(admin_chat_id: int, text: str):
-    user_ids = db_get_all_active_ids()
-    if not user_ids:
-        tg_send_message(admin_chat_id, "⚠️ No active users in database to broadcast to.")
-        return
-    delivered = 0
-    blocked = 0
-    failed = 0
-    for uid in user_ids:
-        res = tg_send_message(uid, text)
-        if res.get("ok"):
-            delivered += 1
-        else:
-            err = res.get("description", "").lower()
-            if "blocked" in err or "deactivated" in err:
-                blocked += 1
-                db_mark_blocked(uid)
-            else:
-                failed += 1
-        time.sleep(0.04)
-    tg_send_message(admin_chat_id, f"📢 <b>Broadcast Complete!</b>\n• Delivered: {delivered}\n• Blocked: {blocked}\n• Failed: {failed}")
-
 # ====================================================================
-# 5. UPDATE DISPATCHER
+# 4. UPDATE DISPATCHER
 # ====================================================================
 
 def process_telegram_update(update: dict):
@@ -375,15 +352,12 @@ def process_telegram_update(update: dict):
         # 1. /start command
         if text.startswith("/start"):
             db_upsert_user(user_id, username, first_name)
-            # Configure native Mini App menu button for user
             tg_set_menu_button(chat_id)
-            # Send Welcome with persistent keyboard
             tg_send_message(
                 chat_id=chat_id,
                 text=WELCOME_MESSAGE,
                 reply_markup=get_persistent_reply_keyboard()
             )
-            # Send direct inline Mini App button
             tg_send_message(
                 chat_id=chat_id,
                 text="👇 <b>Mini ilovani ochish uchun quyidagi tugmani bosing:</b>",
@@ -394,9 +368,10 @@ def process_telegram_update(update: dict):
         # 2. "🚀 OPEN GAME" text message
         if "OPEN GAME" in text.upper():
             db_update_interaction(user_id, username, first_name)
+            tg_set_menu_button(chat_id)
             tg_send_message(
                 chat_id=chat_id,
-                text="🎮 <b>Universal Learning Game</b>\n\nMini ilovani Telegram ichida ochish uchun quyidagi tugmani bosing:",
+                text="🎮 <b>Universal Learning Game</b>\n\nMini ilovani Telegram ichida ochish uchun pastdagi tugmani bosing:",
                 reply_markup=get_open_game_inline_keyboard()
             )
             return
@@ -433,59 +408,23 @@ def process_telegram_update(update: dict):
             tg_send_message(chat_id, get_help_message())
             return
 
-        # 7. /admin and /broadcast
-        if text.startswith("/admin") or text.startswith("/broadcast"):
+        # 7. /admin
+        if text.startswith("/admin"):
             if not is_admin(user_id):
                 tg_send_message(chat_id, "⛔ <b>Access Denied:</b> Administrator only.")
                 return
             db_update_interaction(user_id, username, first_name)
-            if text.startswith("/broadcast"):
-                parts = text.split(maxsplit=1)
-                if len(parts) > 1:
-                    handle_broadcast(chat_id, parts[1].strip())
-                else:
-                    tg_send_message(chat_id, "Usage: <code>/broadcast &lt;message&gt;</code>")
-                return
-            tg_send_message(chat_id, render_admin_stats(), reply_markup=get_admin_keyboard())
+            tg_send_message(chat_id, render_admin_stats())
             return
 
-        # 8. Fallback text
+        # 8. Fallback
         db_update_interaction(user_id, username, first_name)
         fallback = f"Assalomu alaykum, <b>{first_name or 'qadrli foydalanuvchi'}</b>! 👋\n\nMini ilovani Telegram ichida ochish uchun quyidagi tugmani bosing:"
         tg_send_message(chat_id, fallback, reply_markup=get_open_game_inline_keyboard())
         return
 
-    if "callback_query" in update:
-        cb = update["callback_query"]
-        cb_id = cb.get("id")
-        user_id = cb.get("from", {}).get("id")
-        msg = cb.get("message", {})
-        chat_id = msg.get("chat", {}).get("id")
-        message_id = msg.get("message_id")
-        data = cb.get("data", "")
-
-        if cb_id:
-            tg_answer_callback(cb_id)
-        if not chat_id or not message_id or not is_admin(user_id):
-            return
-
-        if data == "admin_stats":
-            tg_edit_message(chat_id, message_id, render_admin_stats(), reply_markup=get_admin_keyboard())
-        elif data == "admin_recent":
-            recent = db_get_recent_users(10)
-            if not recent:
-                t = "👥 <b>Recent Users:</b>\n\nNo records yet."
-            else:
-                lines = ["👥 <b>10 Most Recently Active Users:</b>\n"]
-                for u in recent:
-                    lines.append(f"• <b>{u.get('first_name') or 'User'}</b> (@{u.get('username') or 'none'}) [<code>{u.get('user_id')}</code>] - Starts: {u.get('start_count')}")
-                t = "\n".join(lines)
-            tg_edit_message(chat_id, message_id, t, reply_markup=get_admin_keyboard())
-        elif data == "admin_broadcast_info":
-            tg_edit_message(chat_id, message_id, "📢 <b>Broadcast Command:</b>\n\nSend <code>/broadcast &lt;message&gt;</code> to notify all users.", reply_markup=get_admin_keyboard())
-
 # ====================================================================
-# 6. WSGI APPLICATION (VERCEL ENTRYPOINT)
+# 5. WSGI APPLICATION (VERCEL ENTRYPOINT)
 # ====================================================================
 
 def read_index_html():
@@ -506,7 +445,6 @@ def app(environ, start_response):
     path = raw_path.split("?")[0].rstrip("/")
     method = environ.get("REQUEST_METHOD", "GET").upper()
 
-    # 1. Serve Universal Learning Game HTML website on root / or /index.html
     if path in ("", "/", "/index.html"):
         headers = [
             ("Content-Type", "text/html; charset=utf-8"),
@@ -516,7 +454,6 @@ def app(environ, start_response):
         start_response("200 OK", headers)
         return [INDEX_HTML_DATA]
 
-    # 2. Telegram Webhook endpoint (/api/webhook or /webhook)
     if "/api/webhook" in path or path.endswith("webhook"):
         if method == "POST":
             webhook_secret = os.environ.get("WEBHOOK_SECRET")
@@ -543,13 +480,12 @@ def app(environ, start_response):
             "service": "Universal Learning Game Telegram Webhook",
             "bot_configured": bool(os.environ.get("BOT_TOKEN")),
             "database_configured": bool(os.environ.get("DATABASE_URL")),
-            "web_app_url": get_game_url()
+            "web_app_url": clean_game_url()
         }
         res_bytes = json.dumps(status_info, indent=2).encode("utf-8")
         start_response("200 OK", [("Content-Type", "application/json"), ("Content-Length", str(len(res_bytes)))])
         return [res_bytes]
 
-    # Fallback to index.html
     headers = [("Content-Type", "text/html; charset=utf-8"), ("Content-Length", str(len(INDEX_HTML_DATA)))]
     start_response("200 OK", headers)
     return [INDEX_HTML_DATA]
