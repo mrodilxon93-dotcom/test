@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import time
+import re
 import logging
 import requests
 
@@ -150,7 +151,22 @@ def db_mark_blocked(user_id: int) -> bool:
         return False
 
 # ====================================================================
-# 2. TELEGRAM BOT API CLIENT
+# 2. BULLETPROOF URL CLEANER (Extracts clean URL from any input)
+# ====================================================================
+
+def clean_game_url() -> str:
+    raw = os.environ.get("WEB_APP_URL", "https://universallearninggame.vercel.app")
+    # Search for an HTTP/HTTPS URL within whatever string was set
+    match = re.search(r'https?://[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?:/[^\s\]\)\"\']*)?', raw)
+    if match:
+        url = match.group(0).rstrip("/")
+        if url.startswith("http://"):
+            url = "https://" + url[7:]
+        return url
+    return "https://universallearninggame.vercel.app"
+
+# ====================================================================
+# 3. TELEGRAM BOT API CLIENT
 # ====================================================================
 
 def send_telegram(method: str, payload: dict) -> dict:
@@ -169,49 +185,13 @@ def send_telegram(method: str, payload: dict) -> dict:
         logger.error(f"Telegram API call error ({method}): {e}")
         return {"ok": False, "description": str(e)}
 
-def clean_game_url():
-    raw_url = os.environ.get("WEB_APP_URL", "https://universallearninggame.vercel.app").strip()
-    # Strip quotes or spaces
-    raw_url = raw_url.strip('"').strip("'").strip()
-    if raw_url.startswith("http://"):
-        raw_url = "https://" + raw_url[7:]
-    elif not raw_url.startswith("https://"):
-        raw_url = "https://" + raw_url
-    return raw_url.rstrip("/")
-
 def tg_send_message(chat_id, text: str, reply_markup: dict = None, parse_mode: str = "HTML") -> dict:
     payload = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
     if reply_markup:
         payload["reply_markup"] = reply_markup
-    res = send_telegram("sendMessage", payload)
-    
-    # If failed, attempt sending with a URL fallback button
-    if not res.get("ok") and reply_markup:
-        game_url = clean_game_url()
-        logger.warning(f"Initial sendMessage failed ({res.get('description')}). Retrying with URL fallback...")
-        fallback_markup = {
-            "inline_keyboard": [
-                [{"text": "🚀 Open Game (Havola orqali ochish)", "url": game_url}]
-            ]
-        }
-        res_fallback = send_telegram("sendMessage", {
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": parse_mode,
-            "reply_markup": fallback_markup
-        })
-        if res_fallback.get("ok"):
-            return res_fallback
-            
-        # Ultimate plain text fallback
-        return send_telegram("sendMessage", {
-            "chat_id": chat_id,
-            "text": f"{text}\n\n🔗 Havola: {game_url}"
-        })
-    return res
+    return send_telegram("sendMessage", payload)
 
 def tg_set_menu_button(chat_id: int = None) -> dict:
-    """Sets the Telegram native Mini App menu button at the bottom-left of the chat"""
     url = clean_game_url()
     payload = {
         "menu_button": {
@@ -225,7 +205,7 @@ def tg_set_menu_button(chat_id: int = None) -> dict:
     return send_telegram("setChatMenuButton", payload)
 
 # ====================================================================
-# 3. KEYBOARDS & MESSAGES
+# 4. KEYBOARDS & MESSAGES
 # ====================================================================
 
 def get_persistent_reply_keyboard():
@@ -279,7 +259,7 @@ Good luck! 🚀"""
 
 HOW_TO_USE_MESSAGE = """📖 <b>How to Use Universal Learning Game</b>
 
-1. <b>Open the Mini App:</b> Tap <b>🚀 OPEN GAME</b> on your keyboard or the button below to launch the platform right inside Telegram.
+1. <b>Open the Mini App:</b> Tap the <b>🚀 OPEN MINI APP</b> button below to launch the platform right inside Telegram.
 2. <b>10 Interactive Modes:</b> Learn, Classic Quiz, Flashcards (SRS), Matching Game, and Final Exam simulations.
 3. <b>Slide Evidence:</b> Every question is synchronized with verified lecture presentation slides.
 4. <b>Daily Engagement:</b> Return every day and keep your study streak alive!"""
@@ -333,7 +313,7 @@ def render_admin_stats() -> str:
 • Broadcast: <code>/broadcast &lt;message&gt;</code>"""
 
 # ====================================================================
-# 4. UPDATE DISPATCHER
+# 5. UPDATE DISPATCHER
 # ====================================================================
 
 def process_telegram_update(update: dict):
@@ -356,11 +336,6 @@ def process_telegram_update(update: dict):
             tg_send_message(
                 chat_id=chat_id,
                 text=WELCOME_MESSAGE,
-                reply_markup=get_persistent_reply_keyboard()
-            )
-            tg_send_message(
-                chat_id=chat_id,
-                text="👇 <b>Mini ilovani ochish uchun quyidagi tugmani bosing:</b>",
                 reply_markup=get_open_game_inline_keyboard()
             )
             return
@@ -371,7 +346,7 @@ def process_telegram_update(update: dict):
             tg_set_menu_button(chat_id)
             tg_send_message(
                 chat_id=chat_id,
-                text="🎮 <b>Universal Learning Game</b>\n\nMini ilovani Telegram ichida ochish uchun pastdagi tugmani bosing:",
+                text="🎮 <b>Universal Learning Game</b>\n\nTelegram ichida ochish uchun pastdagi tugmani bosing:",
                 reply_markup=get_open_game_inline_keyboard()
             )
             return
@@ -424,7 +399,7 @@ def process_telegram_update(update: dict):
         return
 
 # ====================================================================
-# 5. WSGI APPLICATION (VERCEL ENTRYPOINT)
+# 6. WSGI APPLICATION (VERCEL ENTRYPOINT)
 # ====================================================================
 
 def read_index_html():
