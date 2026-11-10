@@ -8,7 +8,7 @@ import requests
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Try importing psycopg2 for Supabase / PostgreSQL
+# Try importing psycopg2 for database
 try:
     import psycopg2
     from psycopg2.extras import RealDictCursor
@@ -160,11 +160,15 @@ def db_mark_blocked(user_id: int) -> bool:
 def send_telegram(method: str, payload: dict) -> dict:
     token = os.environ.get("BOT_TOKEN")
     if not token:
+        logger.error("BOT_TOKEN is missing!")
         return {"ok": False, "description": "BOT_TOKEN not configured"}
     url = f"https://api.telegram.org/bot{token}/{method}"
     try:
         r = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=8)
-        return r.json()
+        res_json = r.json()
+        if not res_json.get("ok"):
+            logger.error(f"Telegram API responded with error ({method}): {res_json}")
+        return res_json
     except Exception as e:
         logger.error(f"Telegram API call error ({method}): {e}")
         return {"ok": False, "description": str(e)}
@@ -185,28 +189,56 @@ def tg_answer_callback(callback_id: str, text: str = None) -> dict:
     return send_telegram("answerCallbackQuery", {"callback_query_id": callback_id, "text": text or ""})
 
 # ====================================================================
-# 3. KEYBOARDS & MESSAGES
+# 3. KEYBOARDS & MESSAGES (TELEGRAM MINI APP INTEGRATION)
 # ====================================================================
 
 def get_game_url():
-    return os.environ.get("WEB_APP_URL", "https://universallearninggame.vercel.app/")
+    url = os.environ.get("WEB_APP_URL", "https://universallearninggame.vercel.app/")
+    if not url.startswith("http"):
+        url = "https://" + url
+    return url
 
 def get_persistent_reply_keyboard():
+    """
+    Bottom persistent keyboard. The '🚀 OPEN GAME' button uses 'web_app'
+    so pressing it opens the Telegram Mini App directly inside Telegram!
+    """
+    url = get_game_url()
     return {
         "keyboard": [
-            [{"text": "🚀 OPEN GAME"}],
-            [{"text": "📖 How to Use"}, {"text": "ℹ️ About"}],
-            [{"text": "📢 Updates / Announcements"}, {"text": "🆘 Help & Support"}]
+            [
+                {
+                    "text": "🚀 OPEN GAME",
+                    "web_app": {"url": url}
+                }
+            ],
+            [
+                {"text": "📖 How to Use"},
+                {"text": "ℹ️ About"}
+            ],
+            [
+                {"text": "📢 Updates / Announcements"},
+                {"text": "🆘 Help & Support"}
+            ]
         ],
         "is_persistent": True,
         "resize_keyboard": True,
         "one_time_keyboard": False
     }
 
-def get_open_game_url_keyboard():
+def get_open_game_inline_keyboard():
+    """
+    Inline button sent in chat. Clicking it launches the Mini App inside Telegram!
+    """
+    url = get_game_url()
     return {
         "inline_keyboard": [
-            [{"text": "🌐 Click to Play in Browser", "url": get_game_url()}]
+            [
+                {
+                    "text": "🚀 Open Mini App Inside Telegram",
+                    "web_app": {"url": url}
+                }
+            ]
         ]
     }
 
@@ -224,7 +256,7 @@ Ready to improve your knowledge and challenge yourself?
 
 Your learning journey starts here.
 
-Press the <b>🚀 OPEN GAME</b> button on your keyboard below to launch the learning platform!
+Press the <b>🚀 Open Mini App</b> button below to launch the learning platform directly inside Telegram!
 
 📌 Reminder: Come back every day and press START or tap OPEN GAME below to continue your streak.
 
@@ -232,19 +264,19 @@ Good luck! 🚀"""
 
 HOW_TO_USE_MESSAGE = """📖 <b>How to Use Universal Learning Game</b>
 
-1. <b>Persistent Keyboard:</b> Look at the permanent action buttons pinned at the bottom of your chat screen.
-2. <b>Launch the Game:</b> Tap <b>🚀 OPEN GAME</b> anytime to receive your direct clickable browser access link.
-3. <b>Explore the 10 Study Modes:</b> Enjoy Learn Mode, Classic Quiz, Flashcards (Spaced Repetition), Matching Game, and Final Exam simulations in your browser.
-4. <b>Daily Engagement:</b> Return every day, tap <b>🚀 OPEN GAME</b> or send <b>/start</b> to maintain your daily study routine!"""
+1. <b>Open the Mini App:</b> Tap <b>🚀 OPEN GAME</b> on your keyboard or the inline button to launch the platform right inside Telegram.
+2. <b>10 Interactive Modes:</b> Learn, Classic Quiz, Flashcards (SRS), Matching Game, and Final Exam simulations.
+3. <b>Slide Evidence:</b> Every question is synchronized with verified lecture presentation slides.
+4. <b>Daily Engagement:</b> Return every day and keep your study streak alive!"""
 
 ABOUT_MESSAGE = """ℹ️ <b>About Universal Learning Game</b>
 
-<b>Universal Learning Game</b> is an educational study platform designed to transform complex lecture materials, PowerPoint presentations, and questions into an engaging study game.
+<b>Universal Learning Game</b> is an interactive educational platform designed to transform complex lecture materials, PowerPoint slides, and questions into an engaging Telegram Mini App.
 
 ✨ <b>Platform Highlights:</b>
-• <b>10 Interactive Game Modes:</b> Learn, Quiz, Flashcards (SRS), Matching, Fill in the Blanks, True/False, and Final Exam.
-• <b>Slide Evidence Synchronization:</b> Real-time theoretical proof from verified lecture slides.
-• <b>Bilingual Support:</b> English questions with accurate Uzbek terminology.
+• <b>10 Study Modes:</b> Learn, Quiz, Flashcards (SRS), Matching, Fill in the Blanks, True/False, and Final Exam.
+• <b>Slide Evidence Synchronization:</b> Real-time proof from lecture slides.
+• <b>Native Telegram Experience:</b> Opens directly inside Telegram in fullscreen.
 
 Current Course: <b>Lecture 5 · The Verb and Verbal Categories</b> (61 Questions & 51 Slides)"""
 
@@ -252,13 +284,13 @@ UPDATES_MESSAGE = """📢 <b>Latest Announcements & Updates</b>
 
 <b>Version 2.5 Release Notes:</b>
 • 🎓 <b>Lecture 5 is Live:</b> 61 questions and 51 slides covering Theoretical English Grammar.
-• ⌨️ <b>Persistent Reply Keyboard:</b> Action buttons are now permanently pinned at the bottom of your chat.
-• 🌐 <b>External Browser Support:</b> Game opens directly in your default browser.
-• 🔄 <b>Dynamic Answer Shuffling:</b> Option positions are randomized on every round."""
+• 📱 <b>Telegram Mini App Integration:</b> Opens inside Telegram with fullscreen support.
+• 🔄 <b>Dynamic Answer Shuffling:</b> Option positions are randomized on every round.
+• ⏩ <b>Skip & Navigation:</b> Jump freely between questions."""
 
 def get_help_message():
     sup = os.environ.get("SUPPORT_USERNAME", "Odilxon_Support").lstrip("@")
-    return f"""🆘 <b>Help & Support</b>\n\nNeed assistance or have questions?\n\n• <b>Direct Support:</b> @{sup}\n• <b>Service:</b> Available 24/7 on Vercel Serverless."""
+    return f"""🆘 <b>Help & Support</b>\n\nNeed assistance or have questions?\n\n• <b>Direct Support:</b> @{sup}\n• <b>Platform Status:</b> Online 24/7 on Vercel Serverless."""
 
 # ====================================================================
 # 4. ADMIN LOGIC
@@ -331,14 +363,27 @@ def process_telegram_update(update: dict):
         # /start command
         if text.startswith("/start"):
             db_upsert_user(user_id, username, first_name)
-            tg_send_message(chat_id, WELCOME_MESSAGE, reply_markup=get_persistent_reply_keyboard())
+            tg_send_message(
+                chat_id=chat_id,
+                text=WELCOME_MESSAGE,
+                reply_markup=get_persistent_reply_keyboard()
+            )
+            # Send inline button directly to launch Mini App
+            tg_send_message(
+                chat_id=chat_id,
+                text="👇 <b>Mini ilovani ochish uchun quyidagi tugmani bosing:</b>",
+                reply_markup=get_open_game_inline_keyboard()
+            )
             return
 
-        # "🚀 OPEN GAME" button
+        # "🚀 OPEN GAME" text message
         if "OPEN GAME" in text.upper():
             db_update_interaction(user_id, username, first_name)
-            url_msg = f"🎮 <b>Universal Learning Game</b>\n\nTap below to launch the game in your browser:\n\n🔗 <a href='{get_game_url()}'>{get_game_url()}</a>"
-            tg_send_message(chat_id, url_msg, reply_markup=get_open_game_url_keyboard())
+            tg_send_message(
+                chat_id=chat_id,
+                text="🎮 <b>Universal Learning Game</b>\n\nTelegram ichida ochish uchun quyidagi tugmani bosing:",
+                reply_markup=get_open_game_inline_keyboard()
+            )
             return
 
         # "📖 How to Use"
@@ -383,8 +428,8 @@ def process_telegram_update(update: dict):
 
         # Fallback text
         db_update_interaction(user_id, username, first_name)
-        fallback = f"Hello, <b>{first_name or 'there'}</b>! 👋\n\nTap <b>🚀 OPEN GAME</b> on your keyboard below to start playing."
-        tg_send_message(chat_id, fallback, reply_markup=get_persistent_reply_keyboard())
+        fallback = f"Assalomu alaykum, <b>{first_name or 'qadrli foydalanuvchi'}</b>! 👋\n\nO'yinni ochish uchun quyidagi tugmani bosing:"
+        tg_send_message(chat_id, fallback, reply_markup=get_open_game_inline_keyboard())
         return
 
     if "callback_query" in update:
@@ -420,7 +465,6 @@ def process_telegram_update(update: dict):
 # 6. WSGI APPLICATION (VERCEL PYTHON ENTRYPOINT)
 # ====================================================================
 
-# Preload index.html bytes
 def read_index_html():
     candidates = ["index.html", "../index.html", os.path.join(os.path.dirname(__file__), "..", "index.html"), os.path.join(os.path.dirname(__file__), "index.html")]
     for c in candidates:
@@ -486,6 +530,5 @@ def app(environ, start_response):
     start_response("200 OK", headers)
     return [INDEX_HTML_DATA]
 
-# Compatibility aliases
 handler = app
 application = app
